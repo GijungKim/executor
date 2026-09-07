@@ -214,6 +214,31 @@ scenario(
         "infiniteQueryOptions",
       );
 
+      // Bracket notation must follow the same binding contract as dotted
+      // references: missing integrations are not silently ignored, and a
+      // literal connection path is rejected before persistence. The slug is
+      // unique and deliberately unregistered; no upstream service is needed.
+      const missingIntegration = `bracket-check-${suffix}`;
+      const beforeRejected = yield* client.artifacts.list();
+      const missingBinding = yield* session.call("create-artifact", {
+        code: `function App(){ useQuery(tools['${missingIntegration}'].query.queryOptions({})); return <div/>; }`,
+        title: `Missing bracket binding ${suffix}`,
+      });
+      expect(missingBinding.ok, "a single-quoted root still requires a real connection").toBe(
+        false,
+      );
+      expect(missingBinding.text).toContain(`No ${missingIntegration} connection`);
+
+      const pinnedBinding = yield* session.call("create-artifact", {
+        code: `function App(){ useQuery(tools['${missingIntegration}']["org"]['shared'].query.queryOptions({})); return <div/>; }`,
+        title: `Pinned bracket binding ${suffix}`,
+      });
+      expect(pinnedBinding.ok, "bracket syntax cannot pin a connection in saved code").toBe(false);
+      expect(pinnedBinding.text).toContain("Artifact code must not name a connection");
+      expect((yield* client.artifacts.list()).length, "neither rejection saved an artifact").toBe(
+        beforeRejected.length,
+      );
+
       const rendered = yield* session.call("create-artifact", {
         code: artifactSource(marker),
         title,
@@ -232,6 +257,22 @@ scenario(
 
       artifactId = structured.artifactId as ArtifactId;
       expect(artifactId, "the artifact was persisted and its id returned").toBeTruthy();
+
+      const beforePinnedEdit = yield* client.artifacts.get({ params: { artifactId } });
+      const pinnedEdit = yield* session.call("edit-artifact", {
+        artifactId,
+        edits: [
+          {
+            oldText: beforePinnedEdit.code,
+            newText: `function App(){ useQuery(tools["${missingIntegration}"].user['personal'].query.queryOptions({})); return <div/>; }`,
+          },
+        ],
+      });
+      expect(pinnedEdit.ok, "edit-artifact also rejects bracketed pinned connections").toBe(false);
+      expect(pinnedEdit.text).toContain("Artifact code must not name a connection");
+      expect((yield* client.artifacts.get({ params: { artifactId } })).code).toBe(
+        beforePinnedEdit.code,
+      );
 
       const url = String(structured.url);
       expect(rendered.text, "the model is handed the URL to relay to the user").toContain(url);

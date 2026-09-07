@@ -1949,6 +1949,56 @@ describe("MCP host — edit-artifact", () => {
     );
   });
 
+  it("binds a single-quoted root on edit and refuses a later pinned-path edit atomically", async () => {
+    const store = makeArtifactStore();
+    const code =
+      "function App(){ useQuery(tools['cloudflare-bindings'].query.queryOptions({})); return <div/>; }";
+    await withClient(
+      makeStubEngine({}),
+      APPS_CAPS,
+      async (client) => {
+        await seed(client);
+        const edited = await client.callTool({
+          name: "edit-artifact",
+          arguments: {
+            artifactId: "art_1",
+            edits: [{ oldText: COUNTER_CODE, newText: code }],
+            connections: { "cloudflare-bindings": "cloudflare-bindings.org.shared" },
+          },
+        });
+        expect(edited.isError, textOf(edited)).toBeFalsy();
+        expect(store.rows.get("art_1")?.bindings).toEqual({
+          "cloudflare-bindings": {
+            integration: "cloudflare-bindings",
+            owner: "org",
+            connection: "shared",
+          },
+        });
+
+        const refused = await client.callTool({
+          name: "edit-artifact",
+          arguments: {
+            artifactId: "art_1",
+            edits: [
+              {
+                oldText: "tools['cloudflare-bindings'].query",
+                newText: "tools['cloudflare-bindings']['org']['shared'].query",
+              },
+            ],
+          },
+        });
+        expect(refused.isError).toBe(true);
+        expect(textOf(refused)).toContain("Artifact code must not name a connection");
+        expect(store.calls).toHaveLength(2);
+        expect(store.rows.get("art_1")?.code).toBe(code);
+      },
+      {
+        artifacts: store.port,
+        connections: connectionsPort([conn("cloudflare-bindings", "org", "shared")]),
+      },
+    );
+  });
+
   it("updates the title and description when asked, keeping the patched code", async () => {
     const store = makeArtifactStore();
     await withClient(
@@ -2171,6 +2221,30 @@ describe("MCP host — create-artifact binding", () => {
       },
     );
   });
+
+  it("refuses bracketed pinned paths before create-artifact can persist them", async () => {
+    const store = makeArtifactStore();
+    await withClient(
+      makeStubEngine({}),
+      APPS_CAPS,
+      async (client) => {
+        const result = await client.callTool({
+          name: "create-artifact",
+          arguments: {
+            title: "Pinned bracket path",
+            code: "function App(){ useQuery(tools['cloudflare-bindings']['org']['shared'].query.queryOptions({})); return <div/>; }",
+          },
+        });
+        expect(result.isError).toBe(true);
+        expect(textOf(result)).toContain('tools["cloudflare-bindings"].<tool>(args)');
+        expect(store.calls).toEqual([]);
+      },
+      {
+        artifacts: store.port,
+        connections: connectionsPort([conn("cloudflare-bindings", "org", "shared")]),
+      },
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2234,6 +2308,17 @@ describe("MCP host — execute-action binding resolution", () => {
     expect(executed).toEqual([
       'return await tools.vercel.user.personalVercel.domains.getDomains({"limit":100})',
     ]);
+  });
+
+  it("creates a single-quoted root and resolves the shell's JSON-quoted action through its binding", async () => {
+    const { result, executed } = await runBoundAction({
+      code: "function App(){ useQuery(tools['cloudflare-bindings']('prod').query.queryOptions({})); return <div/>; }",
+      available: [conn("cloudflare-bindings", "org", "shared")],
+      connections: { prod: "cloudflare-bindings.org.shared" },
+      action: { code: 'return await tools["cloudflare-bindings"]("prod").query({})' },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(executed).toEqual(['return await tools["cloudflare-bindings"].org.shared.query({})']);
   });
 
   it("routes each role to its own connection", async () => {

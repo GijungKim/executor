@@ -36,6 +36,56 @@ describe("extractArtifactRoles", () => {
     expect(roles).toEqual([{ role: "cloudflare-bindings", integration: "cloudflare-bindings" }]);
   });
 
+  it.each([
+    `tools['cloudflare-bindings']`,
+    `tools [ 'cloudflare-bindings' ]`,
+    `tools [ "cloudflare-bindings" ]`,
+  ])("reads a static bracket root: %s", (root) => {
+    expect(extractArtifactRoles(`${root}.query.queryOptions({});`)).toEqual([
+      { role: "cloudflare-bindings", integration: "cloudflare-bindings" },
+    ]);
+  });
+
+  it("reads both role quote flavours after either bracket quote flavour", () => {
+    expect(
+      extractArtifactRoles(`
+        tools['cloudflare-bindings']("prod").query.queryOptions({});
+        tools["cloudflare-bindings"]('staging').query.queryOptions({});
+      `),
+    ).toEqual([
+      { role: "prod", integration: "cloudflare-bindings" },
+      { role: "staging", integration: "cloudflare-bindings" },
+    ]);
+  });
+
+  it("deduplicates mixed bracket and dotted references", () => {
+    expect(
+      extractArtifactRoles(
+        `tools.linear.issues.list(); tools['linear'].issues.list(); tools["linear"].issues.list();`,
+      ),
+    ).toEqual([{ role: "linear", integration: "linear" }]);
+  });
+
+  it("ignores bracketed system roots, comments and another object's tools", () => {
+    expect(
+      extractArtifactRoles(`
+        tools['search']({}); tools["describe"].tool({}); tools['executor'].coreTools.connections.list({});
+        // tools['ignored-comment'].query({});
+        /* tools["ignored-block"].query({}); */
+        other.tools['ignored-property'].query({});
+        mytools['ignored-name'].query({});
+      `),
+    ).toEqual([]);
+  });
+
+  it.each([
+    `tools[integration].query({});`,
+    `tools['cloudflare-' + suffix].query({});`,
+    "tools[`cloudflare-bindings`].query({});",
+  ])("does not infer a static binding from computed syntax: %s", (code) => {
+    expect(extractArtifactRoles(code)).toEqual([]);
+  });
+
   it("collapses repeated references to one role", () => {
     const roles = extractArtifactRoles(
       `useQuery(tools.linear.issues.list.queryOptions({}));
@@ -113,6 +163,42 @@ describe("oldStyleAddressRejection", () => {
     ).toContain("tools.inventory.org.");
   });
 
+  it.each([
+    `tools['cloudflare-bindings'].user.personal.query`,
+    `tools["cloudflare-bindings"].org.shared.query`,
+    `tools['cloudflare-bindings']['user']['personal'].query`,
+    `tools["cloudflare-bindings"]["org"]["shared"].query`,
+    `tools ['cloudflare-bindings'] [ "org" ] ['shared'].query`,
+    `tools.inventory['user'].personal.query`,
+    `tools.inventory["org"].shared.query`,
+    `tools.inventory.org['shared'].query`,
+  ])("rejects bracketed connection paths: %s", (path) => {
+    expect(oldStyleAddressRejection(`useQuery(${path}.queryOptions({}));`)).toContain(
+      "Artifact code must not name a connection",
+    );
+  });
+
+  it("uses valid bracket notation in a hyphenated root's rejection guidance", () => {
+    const message = oldStyleAddressRejection(`tools['cloudflare-bindings'].org.shared.query({});`);
+    expect(message).toContain('tools["cloudflare-bindings"].org.');
+    expect(message).toContain('tools["cloudflare-bindings"].<tool>(args)');
+    expect(message).toContain('tools["cloudflare-bindings"]("prod")');
+    expect(message).not.toContain("tools.cloudflare-bindings");
+  });
+
+  it.each([
+    `tools['cloudflare-bindings'].query.queryOptions({});`,
+    `tools["cloudflare-bindings"]('prod').query.queryOptions({});`,
+    `tools['cloudflare-bindings'].admin['user'].query({});`,
+    `tools.inventory['organization'].query({});`,
+    `tools.inventory.userProfile.query({});`,
+    `// tools['cloudflare-bindings'].org.shared.query({});`,
+    `/* tools["cloudflare-bindings"]['user'].personal.query({}); */`,
+    `other.tools['cloudflare-bindings'].org.shared.query({});`,
+  ])("keeps non-pinned and ignored bracket references legal: %s", (code) => {
+    expect(oldStyleAddressRejection(code)).toBeNull();
+  });
+
   it("accepts the short form", () => {
     expect(
       oldStyleAddressRejection(`useQuery(tools.vercel.domains.getDomains.queryOptions({}));`),
@@ -139,6 +225,44 @@ describe("oldStyleAddressRejection", () => {
 });
 
 describe("resolveArtifactBindings", () => {
+  it("binds a single-quoted root through the existing connection inventory", () => {
+    const roles = extractArtifactRoles(`tools['cloudflare-bindings']('prod').query({});`);
+    expect(
+      resolveArtifactBindings({
+        roles,
+        connections: { prod: "cloudflare-bindings.org.shared" },
+        available: [connection("cloudflare-bindings", "org", "shared")],
+      }),
+    ).toEqual({
+      ok: true,
+      bindings: {
+        prod: { integration: "cloudflare-bindings", owner: "org", connection: "shared" },
+      },
+    });
+  });
+
+  it("still refuses a mismatched integration for an extracted bracket role", () => {
+    const result = resolveArtifactBindings({
+      roles: extractArtifactRoles(`tools['cloudflare-bindings']('prod').query({});`),
+      connections: { prod: "linear.org.shared" },
+      available: [connection("linear", "org", "shared")],
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message).toContain("A role's connection must belong to the integration");
+  });
+
+  it("still refuses unavailable connections for an extracted bracket role", () => {
+    const result = resolveArtifactBindings({
+      roles: extractArtifactRoles(`tools['cloudflare-bindings'].query({});`),
+      connections: { "cloudflare-bindings": "cloudflare-bindings.org.missing" },
+      available: [connection("cloudflare-bindings", "user", "personal")],
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message).toContain('No connection "cloudflare-bindings.org.missing"');
+  });
+
   it("binds a role silently when the author has exactly one connection", () => {
     const result = resolveArtifactBindings({
       roles: [{ role: "vercel", integration: "vercel" }],
