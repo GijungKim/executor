@@ -72,7 +72,7 @@ scenario(
       const created = yield* session.call("create-artifact", {
         title: `Service schema ${slug}`,
         code: `function App() {
-          const query = useQuery(tools['${slug}'].readSchema.queryOptions({}));
+          const query = useQuery(tools['${slug}'].openapiJson.readSchema.queryOptions({}));
           return <pre data-testid="live-schema">{query.isPending ? "Loading schema" : JSON.stringify(query.data ?? query.error)}</pre>;
         }`,
       });
