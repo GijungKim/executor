@@ -98,7 +98,7 @@ const withCommentsBlanked = (code: string): string =>
  * — property access, a call with an object — is left to the caller's own path
  * handling; extraction only cares which integration slot is being reached.
  */
-const TOOL_ROOT = String.raw`(?:\.\s*([A-Za-z_$][\w$]*)|\[\s*"([A-Za-z_$][\w$-]*)"\s*\])`;
+const TOOL_ROOT = String.raw`(?:\.\s*([A-Za-z_$][\w$]*)|\[\s*(?:"([A-Za-z_$][\w$-]*)"|'([A-Za-z_$][\w$-]*)')\s*\])`;
 const TOOLS_REFERENCE = new RegExp(
   String.raw`(?<![.\w$])tools\s*${TOOL_ROOT}\s*(?:\(\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')\s*\))?`,
   "g",
@@ -141,9 +141,9 @@ export const extractArtifactRoles = (code: string): readonly ArtifactRole[] => {
   const scannable = withCommentsBlanked(code);
   const found = new Map<string, ArtifactRole>();
   for (const match of scannable.matchAll(TOOLS_REFERENCE)) {
-    const integration = match[1] ?? match[2];
+    const integration = match[1] ?? match[2] ?? match[3];
     if (integration === undefined || RESERVED_TOOL_ROOTS.has(integration)) continue;
-    const role = match[3] ?? match[4] ?? integration;
+    const role = match[4] ?? match[5] ?? integration;
     if (role.length === 0) continue;
     if (!found.has(role)) found.set(role, { role, integration });
   }
